@@ -2,10 +2,15 @@ from sqlalchemy.orm import Session
 from . import models, schemas
 from datetime import date, timedelta
 from sqlalchemy import or_
-from fastapi import HTTPException, status
+from fastapi import HTTPException, status, BackgroundTasks
 from passlib.context import CryptContext
 from jose import jwt
 from datetime import datetime, timedelta
+from fastapi_mail import FastMail, MessageSchema
+from secrets import token_urlsafe
+from pydantic import EmailStr
+from app.models import User
+from app.main import conf
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -113,3 +118,25 @@ def get_contacts_with_upcoming_birthdays(db: Session, user_id: int):
         models.Contact.birthday >= today,
         models.Contact.birthday < next_week
     ).all()
+
+
+def send_verification_email(email: EmailStr, db: Session, background_tasks: BackgroundTasks):
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    token = token_urlsafe(32)
+    user.email_verification_token = token
+    db.commit()
+
+    message = MessageSchema(
+        subject="Підтвердження електронної пошти",
+        recipients=[email],
+        body=f"Для підтвердження вашої електронної пошти, будь ласка, перейдіть за посиланням: http://127.0.0.1:8000/users/verify/{
+            token}",
+    )
+
+    fm = FastMail(conf)
+    background_tasks.add_task(fm.send_message, message)

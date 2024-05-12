@@ -1,21 +1,75 @@
-from fastapi import Depends, FastAPI, HTTPException, Query, status, Security
+import cloudinary
+import cloudinary.uploader
+from fastapi import Depends, FastAPI, HTTPException, status, BackgroundTasks, File, UploadFile, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from datetime import timedelta
 from sqlalchemy.orm import Session
-from . import crud, schemas, models
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
+from pydantic import EmailStr
+
+from . import crud, models, schemas
 from database import SessionLocal, engine
 
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-REFRESH_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
-ALGORITHM = "HS256"
-SECRET_KEY = "secret_key"
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
+REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES"))
+ALGORITHM = os.getenv("ALGORITHM")
+SECRET_KEY = os.getenv("SECRET_KEY")
+
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")
+)
+
+conf = ConnectionConfig(
+    MAIL_USERNAME=os.getenv("EMAIL_USERNAME"),
+    MAIL_PASSWORD=os.getenv("EMAIL_PASSWORD"),
+    MAIL_FROM=os.getenv("EMAIL_USERNAME"),
+    MAIL_PORT=int(os.getenv("EMAIL_PORT")),
+    MAIL_SERVER=os.getenv("EMAIL_HOST"),
+    MAIL_TLS=True,
+    MAIL_SSL=False,
+    USE_CREDENTIALS=True,
+    VALIDATE_CERTS=True,
+)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
 app = FastAPI()
 models.Base.metadata.create_all(bind=engine)
+
+
+origins = [
+    "*"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["10/minute"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+MAX_FILE_SIZE = 1 * 1024 * 1024  # 1 MB
+
+ALLOWED_FILE_TYPES = ["image/jpeg", "image/png"]
 
 
 def get_db():
@@ -46,58 +100,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     return user
 
 
-@app.post("/contacts/", response_model=schemas.Contact, status_code=status.HTTP_201_CREATED)
-def create_contact(contact: schemas.ContactCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return crud.create_contact(db=db, contact=contact, user_id=current_user.id)
-
-
-@app.get("/contacts/", response_model=list[schemas.Contact])
-def read_contacts(skip: int = 0, limit: int = 100, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    contacts = crud.get_contacts(
-        db, skip=skip, limit=limit, user_id=current_user.id)
-    return contacts
-
-
-@app.get("/contacts/{contact_id}", response_model=schemas.Contact)
-def read_contact(contact_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    db_contact = crud.get_contact(
-        db, contact_id=contact_id, user_id=current_user.id)
-    if db_contact is None:
-        raise HTTPException(status_code=404, detail="Contact not found")
-    return db_contact
-
-
-@app.put("/contacts/{contact_id}", response_model=schemas.Contact)
-def update_contact(contact_id: int, contact: schemas.ContactUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    db_contact = crud.update_contact(
-        db, contact_id=contact_id, contact=contact, user_id=current_user.id)
-    if db_contact is None:
-        raise HTTPException(status_code=404, detail="Contact not found")
-    return db_contact
-
-
-@app.delete("/contacts/{contact_id}", response_model=schemas.Contact)
-def delete_contact(contact_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    db_contact = crud.delete_contact(
-        db, contact_id=contact_id, user_id=current_user.id)
-    if db_contact is None:
-        raise HTTPException(status_code=404, detail="Contact not found")
-    return db_contact
-
-
-@app.get("/contacts/search/", response_model=list[schemas.Contact])
-def search_contacts(query: str = Query(..., description="Search query"), session: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
-    contacts = crud.search_contacts(session, query=query, user_id=user.id)
-    return contacts
-    return contacts
-
-
-@app.get("/contacts/birthdays/", response_model=list[schemas.Contact])
-def get_contacts_with_upcoming_birthdays(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    contacts = crud.get_contacts_with_upcoming_birthdays(
-        db, user_id=current_user.id)
-    return contacts
-
 
 @app.post("/users/", response_model=schemas.User, status_code=status.HTTP_201_CREATED)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -108,8 +110,53 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     return crud.create_user(db=db, user=user)
 
 
+@app.post("/users/send_verification_email/")
+async def send_verification_email_endpoint(email: schemas.EmailSchema, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    user = crud.get_user_by_email(db, email=email.email)
+    if user is None or user.is_verified:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Invalid email or already verified")
+    crud.send_verification_email(email.email, db, background_tasks)
+    return {"message": "Verification email sent"}
+
+
+@app.get("/users/verify/{token}")
+async def verify_email(token: str, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(
+        models.User.email_verification_token == token).first()
+    if user is None or user.is_verified:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Invalid token or already verified")
+    user.is_verified = True
+    db.commit()
+    return {"message": "Email verified"}
+
+
 @app.post("/token/", response_model=schemas.Token)
 def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = crud.authenticate_user_and_get_tokens(db, schemas.UserLogin(
         email=form_data.username, password=form_data.password))
     return user
+
+
+@app.post("/users/avatar", response_model=schemas.User)
+async def upload_avatar(file: UploadFile = File(...), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    if file.size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="File size too large")
+
+    if file.content_type not in ALLOWED_FILE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file type")
+
+    try:
+        result = cloudinary.uploader.upload(file.file)
+    except cloudinary.exceptions.CloudinaryError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error uploading file: {e}")
+
+    current_user.avatar_url = result["secure_url"]
+    db.commit()
+    db.refresh(current_user)
+
+    return current_user

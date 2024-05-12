@@ -51,3 +51,7 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     id: int | None = None
+
+
+class EmailSchema(BaseModel):
+    email: str
