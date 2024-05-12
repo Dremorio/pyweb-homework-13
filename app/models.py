@@ -13,12 +13,11 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     contacts = relationship("Contact", back_populates="owner")
-    avatar_url: str = Column(String, nullable=True)
+    avatar_url = Column(String, nullable=True)
+    role = Column(String, default="user")
 
     def verify_password(self, plain_password):
         return pwd_context.verify(plain_password, self.hashed_password)
-    
-        role: str = Column(String, default="user")  # Поле для ролі користувача
 
     def can_view_contact(self, contact: "Contact") -> bool:
         return self.role == "admin" or contact.owner_id == self.id
@@ -42,3 +41,4 @@ class Contact(Base):
     additional_data = Column(String, nullable=True)
     owner_id = Column(Integer, ForeignKey("users.id"))
     owner = relationship("User", back_populates="contacts")
+

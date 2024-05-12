@@ -9,8 +9,6 @@ from datetime import datetime, timedelta
 from fastapi_mail import FastMail, MessageSchema
 from secrets import token_urlsafe
 from pydantic import EmailStr
-from app.models import User
-from app.main import conf
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -20,7 +18,7 @@ SECRET_KEY = "secret_key"
 
 
 def get_user(db: Session, user_id: int):
-    return db.query(models.User).filter(models.User.id == user_id).first()
+    return db.query(models.User).get(user_id)
 
 
 def get_user_by_email(db: Session, email: str):
@@ -41,26 +39,16 @@ def create_user(db: Session, user: schemas.UserCreate):
 
 def authenticate_user(db: Session, user: schemas.UserCreate):
     db_user = get_user_by_email(db, email=user.email)
-    if not db_user:
-        raise HTTPException(
-            status_code=401, detail="Incorrect email or password")
-    if not db_user.verify_password(user.password):
-        raise HTTPException(
-            status_code=401, detail="Incorrect email or password")
+    if not db_user or not db_user.verify_password(user.password):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
     return db_user
 
 
 def get_contacts(db: Session, skip: int = 0, limit: int = 100, user_id: int = None):
+    query = db.query(models.Contact)
     if user_id:
-        return (
-            db.query(models.Contact)
-            .filter(models.Contact.owner_id == user_id)
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
-    else:
-        return db.query(models.Contact).offset(skip).limit(limit).all()
+        query = query.filter(models.Contact.owner_id == user_id)
+    return query.offset(skip).limit(limit).all()
 
 
 def create_contact(db: Session, contact: schemas.ContactCreate, user_id: int):
@@ -72,19 +60,15 @@ def create_contact(db: Session, contact: schemas.ContactCreate, user_id: int):
 
 
 def get_contact(db: Session, contact_id: int, user_id: int):
-    contact = db.query(models.Contact).filter(
+    return db.query(models.Contact).filter(
         models.Contact.id == contact_id, models.Contact.owner_id == user_id).first()
-    if not contact:
-        raise HTTPException(status_code=404, detail="Contact not found")
-    return contact
 
 
 def update_contact(db: Session, contact_id: int, contact: schemas.ContactUpdate, user_id: int):
     db_contact = get_contact(db, contact_id, user_id)
     if not db_contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    for key, value in contact.dict(exclude_unset=True).items():
-        setattr(db_contact, key, value)
+    db_contact.update(contact.dict(exclude_unset=True))
     db.commit()
     db.refresh(db_contact)
     return db_contact
@@ -121,7 +105,7 @@ def get_contacts_with_upcoming_birthdays(db: Session, user_id: int):
 
 
 def send_verification_email(email: EmailStr, db: Session, background_tasks: BackgroundTasks):
-    user = db.query(User).filter(User.email == email).first()
+    user = db.query(models.User).filter(models.User.email == email).first()
 
     if not user:
         raise HTTPException(
@@ -134,9 +118,9 @@ def send_verification_email(email: EmailStr, db: Session, background_tasks: Back
     message = MessageSchema(
         subject="Підтвердження електронної пошти",
         recipients=[email],
-        body=f"Для підтвердження вашої електронної пошти, будь ласка, перейдіть за посиланням: http://127.0.0.1:8000/users/verify/{
-            token}",
+        body=f"Для підтвердження вашої електронної пошти, будь ласка, перейдіть за посиланням: http://127.0.0.1:8000/users/verify/{token}",
     )
 
-    fm = FastMail(conf)
+    fm = FastMail()
     background_tasks.add_task(fm.send_message, message)
+

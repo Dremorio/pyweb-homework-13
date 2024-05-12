@@ -1,5 +1,6 @@
-import cloudinary
 import cloudinary.uploader
+from dotenv import load_dotenv
+import os
 from fastapi import Depends, FastAPI, HTTPException, status, BackgroundTasks, File, UploadFile, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
@@ -9,15 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
 from pydantic import EmailStr
 
 from . import crud, models, schemas
 from database import SessionLocal, engine
-
-from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
@@ -98,7 +95,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     if user is None:
         raise credentials_exception
     return user
-
 
 
 @app.post("/users/", response_model=schemas.User, status_code=status.HTTP_201_CREATED)
